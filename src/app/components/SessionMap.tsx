@@ -29,21 +29,37 @@ const createColoredIcon = (color: string) => {
 // Create object detection marker icon
 const createObjectIcon = () => {
     const svgTemplate = `
-        <svg width="48" height="48" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-            <path fill="#FF0000" d="M2 17h1v5h5v1H2zm21 0h-1v5h-5v1h6zM3 3h5V2H2v6h1zm20-1h-6v1h5v5h1z"/>
-            <path fill="#FF0000" d="M12 11.25h-1.5a.75.75 0 0 1-.75-.75V9a.75.75 0 0 1 .75-.75h1.5a.75.75 0 0 1 .75.75v1.5a.75.75 0 0 1-.75.75z"/>
-            <path fill="#FF0000" d="M13 12h-1v1h1zm7 0h-5v1h5zm-10 0H5v1h5zm3 8v-5h-1v5zm-1-10h1V5h-1z"/>
+        <svg width="32" height="32" viewBox="0 0 32 32" xmlns="http://www.w3.org/2000/svg">
+            <defs>
+                <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+                    <feGaussianBlur stdDeviation="2" result="coloredBlur"/>
+                    <feMerge>
+                        <feMergeNode in="coloredBlur"/>
+                        <feMergeNode in="SourceGraphic"/>
+                    </feMerge>
+                </filter>
+            </defs>
+            <circle cx="16" cy="16" r="14" fill="#ff4444" fill-opacity="0.2" stroke="#ff4444" stroke-width="2"/>
+            <circle cx="16" cy="16" r="6" fill="#ff4444" filter="url(#glow)"/>
+            <path d="M16 4 L16 7 M16 25 L16 28 M4 16 L7 16 M25 16 L28 16" 
+                  stroke="#ff4444" stroke-width="2" stroke-linecap="round"/>
+            <circle cx="16" cy="16" r="2" fill="white"/>
         </svg>
     `;
 
     const svgUrl = `data:image/svg+xml;base64,${btoa(svgTemplate)}`;
 
-    return L.icon({
-        iconUrl: svgUrl,
-        iconSize: [48, 48],
-        iconAnchor: [24, 24],
-        popupAnchor: [0, -24],
-        className: 'object-marker-icon'
+    return L.divIcon({
+        html: `
+            <div style="position: relative;">
+                <img src="${svgUrl}" style="width: 32px; height: 32px;"/>
+                <div class="object-marker-pulse"></div>
+            </div>
+        `,
+        className: 'object-marker-icon',
+        iconSize: [32, 32],
+        iconAnchor: [16, 16],
+        popupAnchor: [0, -16]
     });
 };
 
@@ -226,6 +242,34 @@ export default function SessionMap({ sessions, objectMarkers = [], animationPath
                 @keyframes dash {
                     to {
                         stroke-dashoffset: -16;
+                    }
+                }
+
+                .object-marker-pulse {
+                    position: absolute;
+                    top: 50%;
+                    left: 50%;
+                    transform: translate(-50%, -50%);
+                    width: 32px;
+                    height: 32px;
+                    background-color: #ff4444;
+                    border-radius: 50%;
+                    opacity: 0.4;
+                    animation: object-pulse 2s infinite;
+                }
+
+                @keyframes object-pulse {
+                    0% {
+                        transform: translate(-50%, -50%) scale(1);
+                        opacity: 0.4;
+                    }
+                    50% {
+                        transform: translate(-50%, -50%) scale(1.5);
+                        opacity: 0;
+                    }
+                    100% {
+                        transform: translate(-50%, -50%) scale(1);
+                        opacity: 0.4;
                     }
                 }
             `}</style>
