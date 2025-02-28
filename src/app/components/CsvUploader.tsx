@@ -44,6 +44,23 @@ const SessionMap = dynamic(() => import('./SessionMap'), {
     )
 });
 
+// Add this helper function at the top level
+const getValidTime = (timestamp: string | undefined): number | null => {
+    if (!timestamp || timestamp === 'N/A') return null;
+    try {
+        const time = new Date(timestamp).getTime();
+        return isNaN(time) ? null : time;
+    } catch (e) {
+        return null;
+    }
+};
+
+const getObjectTimes = (markers: ObjectMarker[]): number[] => {
+    return markers
+        .map(m => getValidTime(m.datetime_timestamp))
+        .filter((time): time is number => time !== null);
+};
+
 export default function CsvUploader() {
     const [sessions, setSessions] = useState<SessionData[]>([]);
     const [fps, setFps] = useState<number>(30);
@@ -54,7 +71,7 @@ export default function CsvUploader() {
     const [distanceFilters, setDistanceFilters] = useState<DistanceFilter[]>(DEFAULT_DISTANCE_FILTERS);
     const [isSettingsOpen, setIsSettingsOpen] = useState(false);
     const [timeFilter, setTimeFilter] = useState<TimeFilter>('before');
-    const mapContainerRef = useRef<HTMLDivElement>(null);
+    const mapContainerRef = useRef<HTMLDivElement>(null) as React.MutableRefObject<HTMLDivElement>;
 
     const handleFpsChange = (event: React.ChangeEvent<HTMLSelectElement>) => {
         setFps(Number(event.target.value));
@@ -81,6 +98,7 @@ export default function CsvUploader() {
         Papa.parse(file, {
             complete: (results) => {
                 try {
+                    const totalRows = results.data.length;
                     const parsedData = results.data
                         .filter((row: any) => {
                             const hasValidCoords = !isNaN(Number(row.lat)) && 
@@ -89,12 +107,26 @@ export default function CsvUploader() {
                                                  row.long !== '';
                             return hasValidCoords;
                         })
-                        .map((row: any) => ({
-                            datetime_timestamp: row.datetime_timestamp || 'N/A',
-                            frameId: row.frameId ? Number(row.frameId) : 0,
-                            lat: Number(row.lat),
-                            long: Number(row.long)
-                        }));
+                        .map((row: any) => {
+                            // Validate timestamp before creating clip
+                            const timestamp = row.datetime_timestamp;
+                            const isValidTimestamp = timestamp && 
+                                                   timestamp !== 'N/A' && 
+                                                   !isNaN(new Date(timestamp).getTime());
+
+                            if (!isValidTimestamp) {
+                                console.warn(`Skipped frame ${row.frameId} - invalid/missing timestamp`);
+                                return null;
+                            }
+
+                            return {
+                                datetime_timestamp: timestamp,
+                                frameId: row.frameId ? Number(row.frameId) : 0,
+                                lat: Number(row.lat),
+                                long: Number(row.long)
+                            };
+                        })
+                        .filter((item): item is NonNullable<typeof item> => item !== null);
 
                     if (parsedData.length === 0) {
                         toast.error('No valid data found in the CSV file.');
@@ -112,7 +144,10 @@ export default function CsvUploader() {
                     };
 
                     setSessions(prev => [...prev, newSession]);
-                    toast.success(`Session "${newSession.name}" loaded successfully with ${clipsWithSpeed.length} data points.`);
+                    toast.success(
+                        `Session "${newSession.name}" loaded with ${clipsWithSpeed.length} valid data points. ` +
+                        `${totalRows - clipsWithSpeed.length} invalid rows skipped.`
+                    );
                 } catch (err) {
                     toast.error('Error parsing CSV file. Please check the format.');
                     console.error('Parsing error:', err);
@@ -154,6 +189,13 @@ export default function CsvUploader() {
         sessions.forEach(session => {
             const clip = session.clips.find(c => c.frameId === frameIdNum);
             if (clip) {
+                // Validate clip timestamp
+                const clipTime = getValidTime(clip.datetime_timestamp);
+                if (!clipTime) {
+                    toast.error(`Cannot create marker - invalid timestamp in frame ${frameIdNum}`);
+                    return;
+                }
+
                 found = true;
                 
                 // Create the object marker
@@ -167,7 +209,7 @@ export default function CsvUploader() {
                     approachPoints: []
                 };
 
-                // Find the first approach point
+                // Find approach points
                 const approachPoints = findFirstApproachPoint(session.clips, newMarker);
                 
                 if (approachPoints && approachPoints.length > 0) {
@@ -246,50 +288,78 @@ export default function CsvUploader() {
     // Get active distance filter
     const activeFilter = distanceFilters.find(f => f.isActive);
 
-    // Filter sessions based on distance and time
-    const filteredSessions = sessions.map(session => ({
-        ...session,
-        clips: session.clips.filter(clip => {
-            // First apply distance filter
-            if (activeFilter && clip.distanceFromObject && clip.distanceFromObject > activeFilter.distance) {
-                return false;
-            }
-
-            // Then apply time filter if there are object markers
-            if (objectMarkers.length > 0) {
-                const clipTime = new Date(clip.datetime_timestamp).getTime();
-                const objectTimes = objectMarkers.map(m => new Date(m.datetime_timestamp).getTime());
+    // Filter sessions based on time and distance
+    const filteredSessions = sessions.map(session => {
+        // First, apply time filter if there are object markers
+        let filteredClips = session.clips;
+        
+        if (objectMarkers.length > 0) {
+            const objectTimes = getObjectTimes(objectMarkers);
+            
+            // If no valid object times, skip time filtering
+            if (objectTimes.length > 0) {
                 const earliestObjectTime = Math.min(...objectTimes);
-                
-                switch (timeFilter) {
-                    case 'before':
-                        return clipTime < earliestObjectTime;
-                    case 'after':
-                        return clipTime >= earliestObjectTime;
-                    case 'all':
-                    default:
-                        return true;
-                }
+
+                filteredClips = filteredClips.filter(clip => {
+                    const clipTime = getValidTime(clip.datetime_timestamp);
+                    
+                    // Exclude clips with invalid timestamps
+                    if (clipTime === null) return false;
+                    
+                    switch (timeFilter) {
+                        case 'before':
+                            return clipTime < earliestObjectTime;
+                        case 'after':
+                            return clipTime >= earliestObjectTime;
+                        case 'all':
+                        default:
+                            return true;
+                    }
+                });
             }
+        }
 
-            return true;
-        })
-    }));
+        // Then apply distance filter
+        if (activeFilter) {
+            filteredClips = filteredClips.filter(clip => 
+                clip.distanceFromObject !== undefined && 
+                clip.distanceFromObject <= activeFilter.distance
+            );
+        }
 
-    // Add animation path for vehicle movement (only for 'before' time filter)
+        return {
+            ...session,
+            clips: filteredClips
+        };
+    });
+
+    // Use the same filtering logic for animation path
     const animationPath = timeFilter === 'before' && objectMarkers.length > 0 ? 
-        sessions.flatMap(session => 
-            session.clips
-                .filter(clip => {
-                    const clipTime = new Date(clip.datetime_timestamp).getTime();
-                    const earliestObjectTime = Math.min(
-                        ...objectMarkers.map(m => new Date(m.datetime_timestamp).getTime())
-                    );
-                    return clipTime < earliestObjectTime;
-                })
-                .sort((a, b) => new Date(a.datetime_timestamp).getTime() - new Date(b.datetime_timestamp).getTime())
-                .map(clip => [clip.lat, clip.long])
-        ) : [];
+        sessions
+            .filter(s => s.isVisible)
+            .flatMap(session => {
+                const objectTimes = getObjectTimes(objectMarkers);
+                
+                // If no valid object times, return empty array
+                if (objectTimes.length === 0) return [];
+                
+                const earliestObjectTime = Math.min(...objectTimes);
+
+                return session.clips
+                    .map(clip => {
+                        const clipTime = getValidTime(clip.datetime_timestamp);
+                        return {
+                            ...clip,
+                            validTime: clipTime
+                        };
+                    })
+                    .filter((clip): clip is typeof clip & { validTime: number } => 
+                        clip.validTime !== null && clip.validTime < earliestObjectTime
+                    )
+                    .sort((a, b) => a.validTime - b.validTime)
+                    .map(clip => [clip.lat, clip.long] as [number, number]);
+            })
+    : [];
 
     const visibleSessions = sessions.filter(s => s.isVisible);
     const totalClips = sessions.reduce((sum, session) => sum + session.clips.length, 0);
