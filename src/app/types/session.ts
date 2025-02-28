@@ -186,17 +186,12 @@ export function findFirstApproachPoint(
                     timeDifference: (objectTime.getTime() - clipTime.getTime()) / 1000,
                     targetDistance
                 });
-
-                // Break inner loop if we found a match for this distance
-                break;
             }
         }
-
-        // If we found all distances, stop searching
-        if (foundDistances.size === targetDistances.length) break;
     }
 
-    return approachPoints;
+    // Sort approach points by distance (ascending)
+    return approachPoints.sort((a, b) => a.targetDistance - b.targetDistance);
 }
 
 export type TimeFilter = 'before' | 'after' | 'all';

@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import Papa from 'papaparse';
 import { SessionData, SESSION_COLORS, DEFAULT_DISTANCE_FILTERS, DistanceFilter, ObjectMarker, findFirstApproachPoint, TimeFilter, TIME_FILTER_OPTIONS } from '../types/session';
 import { calculateSpeedBetweenPoints, calculateDistance } from '../utils/calculations';
@@ -27,6 +27,7 @@ import {
 } from 'lucide-react';
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import AnalysisPanel from './AnalysisPanel';
+import ExportReport from './ExportReport';
 
 // Dynamically import the SessionMap component
 const SessionMap = dynamic(() => import('./SessionMap'), {
@@ -53,6 +54,7 @@ export default function CsvUploader() {
     const [distanceFilters, setDistanceFilters] = useState<DistanceFilter[]>(DEFAULT_DISTANCE_FILTERS);
     const [isSettingsOpen, setIsSettingsOpen] = useState(false);
     const [timeFilter, setTimeFilter] = useState<TimeFilter>('before');
+    const mapContainerRef = useRef<HTMLDivElement>(null);
 
     const handleFpsChange = (event: React.ChangeEvent<HTMLSelectElement>) => {
         setFps(Number(event.target.value));
@@ -166,13 +168,14 @@ export default function CsvUploader() {
                 };
 
                 // Find the first approach point
-                const approachPoint = findFirstApproachPoint(session.clips, newMarker);
+                const approachPoints = findFirstApproachPoint(session.clips, newMarker);
                 
-                if (approachPoint) {
-                    newMarker.approachPoints = [approachPoint];
+                if (approachPoints && approachPoints.length > 0) {
+                    newMarker.approachPoints = approachPoints;
+                    const firstPoint = approachPoints[0];
                     toast.success(
-                        `Added marker at frame ${frameIdNum}. Found first approach point at frame ${approachPoint.frameId} ` +
-                        `(${approachPoint.timeDifference.toFixed(1)}s before object, ${approachPoint.distance.toFixed(1)}m away)`
+                        `Added marker at frame ${frameIdNum}. Found ${approachPoints.length} approach points. First point at frame ${firstPoint.frameId} ` +
+                        `(${firstPoint.timeDifference.toFixed(1)}s before object, ${firstPoint.distance.toFixed(1)}m away)`
                     );
                 } else {
                     toast.success(
@@ -254,17 +257,15 @@ export default function CsvUploader() {
 
             // Then apply time filter if there are object markers
             if (objectMarkers.length > 0) {
-                const clipTime = new Date(clip.datetime_timestamp);
+                const clipTime = new Date(clip.datetime_timestamp).getTime();
+                const objectTimes = objectMarkers.map(m => new Date(m.datetime_timestamp).getTime());
+                const earliestObjectTime = Math.min(...objectTimes);
                 
                 switch (timeFilter) {
                     case 'before':
-                        return objectMarkers.some(marker => 
-                            clipTime <= new Date(marker.datetime_timestamp)
-                        );
+                        return clipTime < earliestObjectTime;
                     case 'after':
-                        return objectMarkers.some(marker => 
-                            clipTime > new Date(marker.datetime_timestamp)
-                        );
+                        return clipTime >= earliestObjectTime;
                     case 'all':
                     default:
                         return true;
@@ -274,6 +275,21 @@ export default function CsvUploader() {
             return true;
         })
     }));
+
+    // Add animation path for vehicle movement (only for 'before' time filter)
+    const animationPath = timeFilter === 'before' && objectMarkers.length > 0 ? 
+        sessions.flatMap(session => 
+            session.clips
+                .filter(clip => {
+                    const clipTime = new Date(clip.datetime_timestamp).getTime();
+                    const earliestObjectTime = Math.min(
+                        ...objectMarkers.map(m => new Date(m.datetime_timestamp).getTime())
+                    );
+                    return clipTime < earliestObjectTime;
+                })
+                .sort((a, b) => new Date(a.datetime_timestamp).getTime() - new Date(b.datetime_timestamp).getTime())
+                .map(clip => [clip.lat, clip.long])
+        ) : [];
 
     const visibleSessions = sessions.filter(s => s.isVisible);
     const totalClips = sessions.reduce((sum, session) => sum + session.clips.length, 0);
@@ -342,6 +358,11 @@ export default function CsvUploader() {
                             </p>
                         </div>
                         <div className="flex items-center gap-2">
+                            <ExportReport 
+                                sessions={sessions}
+                                objectMarkers={objectMarkers}
+                                mapRef={mapContainerRef}
+                            />
                             <Button 
                                 variant="outline"
                                 onClick={() => setIsSettingsOpen(true)}
@@ -382,7 +403,13 @@ export default function CsvUploader() {
                         </div>
 
                         <div className="col-span-12 lg:col-span-9">
-                            <SessionMap sessions={filteredSessions} objectMarkers={objectMarkers} />
+                            <div ref={mapContainerRef}>
+                                <SessionMap 
+                                    sessions={filteredSessions} 
+                                    objectMarkers={objectMarkers} 
+                                    animationPath={animationPath}
+                                />
+                            </div>
                         </div>
                     </div>
                 </div>

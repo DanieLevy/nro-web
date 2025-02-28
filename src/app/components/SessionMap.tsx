@@ -1,7 +1,7 @@
 'use client';
 
-import { useEffect } from 'react';
-import { MapContainer, TileLayer, Marker, Popup } from 'react-leaflet';
+import { useEffect, useRef } from 'react';
+import { MapContainer, TileLayer, Marker, Popup, Polyline } from 'react-leaflet';
 import 'leaflet/dist/leaflet.css';
 import L from 'leaflet';
 import { SessionData, ObjectMarker } from '../types/session';
@@ -48,32 +48,101 @@ const createObjectIcon = () => {
 };
 
 // Create approach point marker icon
-const createApproachIcon = (color: string, isFirstApproach: boolean = false) => {
+const createApproachIcon = (color: string, distance: number) => {
     const svgTemplate = `
-        <svg width="36" height="36" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-            <circle cx="12" cy="12" r="10" fill="${color}" fill-opacity="${isFirstApproach ? '0.4' : '0.2'}" stroke="${color}" stroke-width="${isFirstApproach ? '3' : '2'}"/>
+        <svg width="16" height="16" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+            <circle cx="12" cy="12" r="10" fill="${color}" fill-opacity="0.2" stroke="${color}" stroke-width="2"/>
             <circle cx="12" cy="12" r="4" fill="${color}"/>
-            ${isFirstApproach ? '<circle cx="12" cy="12" r="12" fill="none" stroke="${color}" stroke-width="1" stroke-dasharray="2 2"/>' : ''}
         </svg>
     `;
 
     const svgUrl = `data:image/svg+xml;base64,${btoa(svgTemplate)}`;
 
-    return L.icon({
-        iconUrl: svgUrl,
-        iconSize: [36, 36],
-        iconAnchor: [18, 18],
-        popupAnchor: [0, -18],
-        className: `approach-marker-icon${isFirstApproach ? ' first-approach' : ''}`
+    return L.divIcon({
+        html: `
+            <div style="position: relative;">
+                <img src="${svgUrl}" style="width: 16px; height: 16px;"/>
+                <div style="position: absolute; top: -20px; left: 50%; transform: translateX(-50%); 
+                     background-color: ${color}; color: white; padding: 2px 4px; border-radius: 4px; 
+                     font-size: 10px; white-space: nowrap;">
+                    ${distance}m
+                </div>
+            </div>
+        `,
+        className: 'approach-marker-icon',
+        iconSize: [16, 16],
+        iconAnchor: [8, 8],
+        popupAnchor: [0, -8]
     });
 };
 
 interface SessionMapProps {
     sessions: SessionData[];
     objectMarkers: ObjectMarker[];
+    animationPath: [number, number][];
 }
 
-export default function SessionMap({ sessions, objectMarkers = [] }: SessionMapProps) {
+export default function SessionMap({ sessions, objectMarkers = [], animationPath = [] }: SessionMapProps) {
+    const mapRef = useRef<L.Map>(null);
+    const animationRef = useRef<number>(0);
+    const markerRef = useRef<L.Marker | null>(null);
+
+    useEffect(() => {
+        if (!mapRef.current || animationPath.length === 0) return;
+
+        // Create animated marker
+        if (!markerRef.current) {
+            const animatedMarker = L.marker(animationPath[0], {
+                icon: L.divIcon({
+                    className: 'animated-vehicle-marker',
+                    html: `
+                        <div class="w-3 h-3 rounded-full bg-primary border-2 border-white shadow-lg pulse-animation"></div>
+                    `,
+                    iconSize: [12, 12],
+                    iconAnchor: [6, 6]
+                })
+            }).addTo(mapRef.current);
+            markerRef.current = animatedMarker;
+        }
+
+        let currentIdx = 0;
+        const animateMarker = () => {
+            if (currentIdx >= animationPath.length) {
+                currentIdx = 0;
+            }
+
+            if (currentIdx < animationPath.length - 1) {
+                const currentPos = animationPath[currentIdx];
+                const nextPos = animationPath[currentIdx + 1];
+                
+                // Calculate angle for rotation
+                const dx = nextPos[1] - currentPos[1];
+                const dy = nextPos[0] - currentPos[0];
+                const angle = Math.atan2(dx, dy) * 180 / Math.PI;
+                
+                // Update marker position and rotation
+                markerRef.current?.setLatLng(currentPos);
+                const markerElement = markerRef.current?.getElement();
+                if (markerElement) {
+                    markerElement.style.transform += ` rotate(${angle}deg)`;
+                }
+            }
+
+            currentIdx++;
+            animationRef.current = requestAnimationFrame(animateMarker);
+        };
+
+        animateMarker();
+
+        return () => {
+            cancelAnimationFrame(animationRef.current);
+            if (markerRef.current) {
+                markerRef.current.remove();
+                markerRef.current = null;
+            }
+        };
+    }, [animationPath]);
+
     // Calculate center point from all visible clips and object markers
     const visibleClips = sessions
         .filter(s => s.isVisible)
@@ -126,8 +195,8 @@ export default function SessionMap({ sessions, objectMarkers = [] }: SessionMapP
                         opacity: 1;
                     }
                     50% {
-                        transform: scale(1.2);
-                        opacity: 0.8;
+                        transform: scale(1.5);
+                        opacity: 0.5;
                     }
                     100% {
                         transform: scale(1);
@@ -144,6 +213,21 @@ export default function SessionMap({ sessions, objectMarkers = [] }: SessionMapP
                     transform: scale(1.1);
                     transition: all 0.2s ease;
                 }
+
+                .animated-vehicle-marker {
+                    transition: all 0.3s linear;
+                }
+
+                .leaflet-polyline {
+                    stroke-dasharray: 8, 8;
+                    animation: dash 1s linear infinite;
+                }
+
+                @keyframes dash {
+                    to {
+                        stroke-dashoffset: -16;
+                    }
+                }
             `}</style>
             <div className="h-[calc(100vh-12rem)] w-full">
                 <MapContainer
@@ -152,11 +236,23 @@ export default function SessionMap({ sessions, objectMarkers = [] }: SessionMapP
                     style={{ height: '100%', width: '100%' }}
                     bounds={bounds}
                     maxBounds={bounds?.pad(0.5)}
+                    ref={mapRef}
                 >
                     <TileLayer
                         attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
                         url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
                     />
+                    {animationPath.length > 0 && (
+                        <Polyline 
+                            positions={animationPath}
+                            pathOptions={{ 
+                                color: 'var(--primary)', 
+                                weight: 2,
+                                opacity: 0.8,
+                                dashArray: '8, 8'
+                            }}
+                        />
+                    )}
                     {sessions.filter(s => s.isVisible).map((session) => (
                         session.clips.map((clip, index) => (
                             <Marker
@@ -230,51 +326,70 @@ export default function SessionMap({ sessions, objectMarkers = [] }: SessionMapP
                     {objectMarkers.map((marker, index) => (
                         <div key={`object-group-${marker.frameId}`}>
                             {marker.approachPoints?.map((ap, apIndex) => (
-                                <Marker
-                                    key={`approach-${marker.frameId}-${ap.frameId}`}
-                                    position={[ap.lat, ap.long]}
-                                    icon={createApproachIcon(marker.sessionColor, ap.isFirstApproach)}
-                                    zIndexOffset={1000}
-                                >
-                                    <Popup>
-                                        <div className="space-y-4 min-w-[250px]">
-                                            <div className="flex items-center gap-2">
-                                                <div 
-                                                    className="w-3 h-3 rounded-full" 
-                                                    style={{ backgroundColor: marker.sessionColor }}
-                                                />
-                                                <div className="font-medium" style={{ fontSize: '0.95rem' }}>
-                                                    {ap.isFirstApproach ? 'First Approach Point' : 'Approach Point'}
+                                <div key={`approach-${marker.frameId}-${ap.frameId}`}>
+                                    <Marker
+                                        position={[ap.lat, ap.long]}
+                                        icon={createApproachIcon(marker.sessionColor, ap.targetDistance)}
+                                        zIndexOffset={1000}
+                                    >
+                                        <Popup>
+                                            <div className="space-y-4 min-w-[250px]">
+                                                <div className="flex items-center gap-2">
+                                                    <div 
+                                                        className="w-3 h-3 rounded-full" 
+                                                        style={{ backgroundColor: marker.sessionColor }}
+                                                    />
+                                                    <div className="font-medium" style={{ fontSize: '0.95rem' }}>
+                                                        {ap.targetDistance}m Approach Point
+                                                    </div>
                                                 </div>
-                                            </div>
-                                            
-                                            <div className="grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
-                                                <div className="space-y-1">
-                                                    <div className="text-xs font-medium text-muted-foreground">Frame ID</div>
-                                                    <div>{ap.frameId}</div>
-                                                </div>
-                                                <div className="space-y-1">
-                                                    <div className="text-xs font-medium text-muted-foreground">Distance</div>
-                                                    <div>{ap.distance.toFixed(1)} m</div>
-                                                </div>
-                                                <div className="col-span-2 space-y-1">
-                                                    <div className="text-xs font-medium text-muted-foreground">Time Before Object</div>
-                                                    <div>{ap.timeDifference.toFixed(1)} seconds</div>
-                                                </div>
-                                                <div className="col-span-2 space-y-1">
-                                                    <div className="text-xs font-medium text-muted-foreground">Timestamp</div>
-                                                    <div>{ap.datetime_timestamp}</div>
-                                                </div>
-                                                <div className="col-span-2 space-y-1">
-                                                    <div className="text-xs font-medium text-muted-foreground">Coordinates</div>
-                                                    <div className="font-mono text-xs">
-                                                        {ap.lat.toFixed(6)}, {ap.long.toFixed(6)}
+                                                
+                                                <div className="grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
+                                                    <div className="space-y-1">
+                                                        <div className="text-xs font-medium text-muted-foreground">Frame ID</div>
+                                                        <div>{ap.frameId}</div>
+                                                    </div>
+                                                    <div className="space-y-1">
+                                                        <div className="text-xs font-medium text-muted-foreground">Distance</div>
+                                                        <div>{ap.distance.toFixed(1)} m</div>
+                                                    </div>
+                                                    <div className="col-span-2 space-y-1">
+                                                        <div className="text-xs font-medium text-muted-foreground">Time Before Object</div>
+                                                        <div>{ap.timeDifference.toFixed(1)} seconds</div>
+                                                    </div>
+                                                    <div className="col-span-2 space-y-1">
+                                                        <div className="text-xs font-medium text-muted-foreground">Timestamp</div>
+                                                        <div>{ap.datetime_timestamp}</div>
+                                                    </div>
+                                                    <div className="col-span-2 space-y-1">
+                                                        <div className="text-xs font-medium text-muted-foreground">Coordinates</div>
+                                                        <div className="font-mono text-xs">
+                                                            {ap.lat.toFixed(6)}, {ap.long.toFixed(6)}
+                                                        </div>
                                                     </div>
                                                 </div>
                                             </div>
+                                        </Popup>
+                                    </Marker>
+                                    <div 
+                                        className="leaflet-div-icon" 
+                                        style={{
+                                            position: 'absolute',
+                                            left: '0',
+                                            top: '0',
+                                            zIndex: '1000',
+                                            backgroundColor: 'transparent',
+                                            border: 'none'
+                                        }}
+                                    >
+                                        <div 
+                                            className="bg-background/90 px-2 py-0.5 rounded-md text-xs font-medium shadow-sm border"
+                                            style={{ color: marker.sessionColor }}
+                                        >
+                                            {ap.targetDistance}m
                                         </div>
-                                    </Popup>
-                                </Marker>
+                                    </div>
+                                </div>
                             ))}
                             <Marker
                                 key={`object-${marker.frameId}`}
