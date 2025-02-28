@@ -45,19 +45,23 @@ const SessionMap = dynamic(() => import('./SessionMap'), {
 });
 
 // Add this helper function at the top level
-const getValidTime = (timestamp: string | undefined): number | null => {
-    if (!timestamp || timestamp === 'N/A') return null;
-    try {
-        const time = new Date(timestamp).getTime();
-        return isNaN(time) ? null : time;
-    } catch (e) {
-        return null;
+const getTimeOrFrame = (item: { datetime_timestamp: string; frameId: number }): number => {
+    // Try to get valid timestamp first
+    if (item.datetime_timestamp && item.datetime_timestamp !== 'N/A') {
+        try {
+            const time = new Date(item.datetime_timestamp).getTime();
+            if (!isNaN(time)) return time;
+        } catch (e) {
+            // Fall through to use frameId
+        }
     }
+    // Fallback to frameId
+    return item.frameId;
 };
 
 const getObjectTimes = (markers: ObjectMarker[]): number[] => {
     return markers
-        .map(m => getValidTime(m.datetime_timestamp))
+        .map(m => getTimeOrFrame(m))
         .filter((time): time is number => time !== null);
 };
 
@@ -269,29 +273,22 @@ export default function CsvUploader() {
         let filteredClips = session.clips;
         
         if (objectMarkers.length > 0) {
-            const objectTimes = getObjectTimes(objectMarkers);
-            
-            // If no valid object times, skip time filtering
-            if (objectTimes.length > 0) {
-                const earliestObjectTime = Math.min(...objectTimes);
+            // Get earliest object time or frame
+            const earliestObject = Math.min(...objectMarkers.map(m => getTimeOrFrame(m)));
 
-                filteredClips = filteredClips.filter(clip => {
-                    const clipTime = getValidTime(clip.datetime_timestamp);
-                    
-                    // If we can't get a valid time for the clip, include it by default
-                    if (clipTime === null) return true;
-                    
-                    switch (timeFilter) {
-                        case 'before':
-                            return clipTime < earliestObjectTime;
-                        case 'after':
-                            return clipTime >= earliestObjectTime;
-                        case 'all':
-                        default:
-                            return true;
-                    }
-                });
-            }
+            filteredClips = filteredClips.filter(clip => {
+                const clipTimeOrFrame = getTimeOrFrame(clip);
+                
+                switch (timeFilter) {
+                    case 'before':
+                        return clipTimeOrFrame < earliestObject;
+                    case 'after':
+                        return clipTimeOrFrame >= earliestObject;
+                    case 'all':
+                    default:
+                        return true;
+                }
+            });
         }
 
         // Then apply distance filter
@@ -313,25 +310,11 @@ export default function CsvUploader() {
         sessions
             .filter(s => s.isVisible)
             .flatMap(session => {
-                const objectTimes = getObjectTimes(objectMarkers);
-                
-                // If no valid object times, return empty array
-                if (objectTimes.length === 0) return [];
-                
-                const earliestObjectTime = Math.min(...objectTimes);
+                const earliestObject = Math.min(...objectMarkers.map(m => getTimeOrFrame(m)));
 
                 return session.clips
-                    .map(clip => {
-                        const clipTime = getValidTime(clip.datetime_timestamp);
-                        return {
-                            ...clip,
-                            validTime: clipTime
-                        };
-                    })
-                    .filter((clip): clip is typeof clip & { validTime: number } => 
-                        clip.validTime !== null && clip.validTime < earliestObjectTime
-                    )
-                    .sort((a, b) => a.validTime - b.validTime)
+                    .filter(clip => getTimeOrFrame(clip) < earliestObject)
+                    .sort((a, b) => getTimeOrFrame(a) - getTimeOrFrame(b))
                     .map(clip => [clip.lat, clip.long] as [number, number]);
             })
     : [];
