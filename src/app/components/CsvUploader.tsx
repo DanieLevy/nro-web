@@ -98,7 +98,6 @@ export default function CsvUploader() {
         Papa.parse(file, {
             complete: (results) => {
                 try {
-                    const totalRows = results.data.length;
                     const parsedData = results.data
                         .filter((row: any) => {
                             const hasValidCoords = !isNaN(Number(row.lat)) && 
@@ -107,26 +106,12 @@ export default function CsvUploader() {
                                                  row.long !== '';
                             return hasValidCoords;
                         })
-                        .map((row: any) => {
-                            // Validate timestamp before creating clip
-                            const timestamp = row.datetime_timestamp;
-                            const isValidTimestamp = timestamp && 
-                                                   timestamp !== 'N/A' && 
-                                                   !isNaN(new Date(timestamp).getTime());
-
-                            if (!isValidTimestamp) {
-                                console.warn(`Skipped frame ${row.frameId} - invalid/missing timestamp`);
-                                return null;
-                            }
-
-                            return {
-                                datetime_timestamp: timestamp,
-                                frameId: row.frameId ? Number(row.frameId) : 0,
-                                lat: Number(row.lat),
-                                long: Number(row.long)
-                            };
-                        })
-                        .filter((item): item is NonNullable<typeof item> => item !== null);
+                        .map((row: any) => ({
+                            datetime_timestamp: row.datetime_timestamp || 'N/A',
+                            frameId: row.frameId ? Number(row.frameId) : 0,
+                            lat: Number(row.lat),
+                            long: Number(row.long)
+                        }));
 
                     if (parsedData.length === 0) {
                         toast.error('No valid data found in the CSV file.');
@@ -144,10 +129,7 @@ export default function CsvUploader() {
                     };
 
                     setSessions(prev => [...prev, newSession]);
-                    toast.success(
-                        `Session "${newSession.name}" loaded with ${clipsWithSpeed.length} valid data points. ` +
-                        `${totalRows - clipsWithSpeed.length} invalid rows skipped.`
-                    );
+                    toast.success(`Session "${newSession.name}" loaded successfully with ${clipsWithSpeed.length} data points.`);
                 } catch (err) {
                     toast.error('Error parsing CSV file. Please check the format.');
                     console.error('Parsing error:', err);
@@ -189,13 +171,6 @@ export default function CsvUploader() {
         sessions.forEach(session => {
             const clip = session.clips.find(c => c.frameId === frameIdNum);
             if (clip) {
-                // Validate clip timestamp
-                const clipTime = getValidTime(clip.datetime_timestamp);
-                if (!clipTime) {
-                    toast.error(`Cannot create marker - invalid timestamp in frame ${frameIdNum}`);
-                    return;
-                }
-
                 found = true;
                 
                 // Create the object marker
@@ -209,7 +184,7 @@ export default function CsvUploader() {
                     approachPoints: []
                 };
 
-                // Find approach points
+                // Find the first approach point
                 const approachPoints = findFirstApproachPoint(session.clips, newMarker);
                 
                 if (approachPoints && approachPoints.length > 0) {
@@ -303,8 +278,8 @@ export default function CsvUploader() {
                 filteredClips = filteredClips.filter(clip => {
                     const clipTime = getValidTime(clip.datetime_timestamp);
                     
-                    // Exclude clips with invalid timestamps
-                    if (clipTime === null) return false;
+                    // If we can't get a valid time for the clip, include it by default
+                    if (clipTime === null) return true;
                     
                     switch (timeFilter) {
                         case 'before':
