@@ -1,49 +1,27 @@
 'use client';
 
-import { useEffect, useRef } from 'react';
-import { MapContainer, TileLayer, Marker, Popup, Polyline } from 'react-leaflet';
+import { useEffect, useRef, useState, useMemo } from 'react';
+import { MapContainer, TileLayer, Marker, Popup, Polyline, Circle, useMap, ZoomControl } from 'react-leaflet';
 import 'leaflet/dist/leaflet.css';
 import L from 'leaflet';
-import { SessionData, ObjectMarker } from '../types/session';
-import { Card } from '@/components/ui/card';
+import { SessionData, ObjectMarker, ClipData, TimeFilter, findFirstApproachPoint, ApproachPoint } from '../types/session';
+import { calculateDistance, calculateSpeedProfile, detectManeuvers, kalmanSmoothCoordinates, SpeedData } from '../utils/calculations';
+import { formatTime, formatTimeDifference } from '../utils/timeUtils';
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Separator } from '@/components/ui/separator';
+import { Navigation, BarChart2, Map as MapIcon, Activity, Clock, Gauge, Info, ChevronRight, AlertTriangle } from 'lucide-react';
+import { Button } from "@/components/ui/button";
+import { Slider } from "../components/ui/slider";
+import { Toggle } from "../components/ui/toggle";
+import { Badge } from "../components/ui/badge";
+import { useTheme } from 'next-themes';
 
 // Create a custom marker icon with dynamic color
 const createColoredIcon = (color: string) => {
     const svgTemplate = `
-        <svg width="24" height="36" viewBox="0 0 24 36" fill="${color}" xmlns="http://www.w3.org/2000/svg">
-            <path d="M12 0C5.38 0 0 5.38 0 12c0 8.25 12 24 12 24s12-15.75 12-24c0-6.62-5.38-12-12-12zm0 16c-2.21 0-4-1.79-4-4s1.79-4 4-4 4 1.79 4 4-1.79 4-4 4z"/>
-        </svg>
-    `;
-
-    const svgUrl = `data:image/svg+xml;base64,${btoa(svgTemplate)}`;
-
-    return L.icon({
-        iconUrl: svgUrl,
-        iconSize: [24, 36],
-        iconAnchor: [12, 36],
-        popupAnchor: [0, -36]
-    });
-};
-
-// Create object detection marker icon
-const createObjectIcon = () => {
-    const svgTemplate = `
-        <svg width="32" height="32" viewBox="0 0 32 32" xmlns="http://www.w3.org/2000/svg">
-            <defs>
-                <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
-                    <feGaussianBlur stdDeviation="2" result="coloredBlur"/>
-                    <feMerge>
-                        <feMergeNode in="coloredBlur"/>
-                        <feMergeNode in="SourceGraphic"/>
-                    </feMerge>
-                </filter>
-            </defs>
-            <circle cx="16" cy="16" r="14" fill="#ff4444" fill-opacity="0.2" stroke="#ff4444" stroke-width="2"/>
-            <circle cx="16" cy="16" r="6" fill="#ff4444" filter="url(#glow)"/>
-            <path d="M16 4 L16 7 M16 25 L16 28 M4 16 L7 16 M25 16 L28 16" 
-                  stroke="#ff4444" stroke-width="2" stroke-linecap="round"/>
-            <circle cx="16" cy="16" r="2" fill="white"/>
+        <svg width="20" height="20" viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg">
+            <circle cx="10" cy="10" r="8" fill="${color}" fill-opacity="0.2" stroke="${color}" stroke-width="2"/>
+            <circle cx="10" cy="10" r="4" fill="${color}"/>
         </svg>
     `;
 
@@ -51,437 +29,506 @@ const createObjectIcon = () => {
 
     return L.divIcon({
         html: `
-            <div style="position: relative;">
-                <img src="${svgUrl}" style="width: 32px; height: 32px;"/>
-                <div class="object-marker-pulse"></div>
+            <div class="session-marker" style="position: relative;">
+                <img src="${svgUrl}" style="width: 20px; height: 20px;"/>
+                <div class="marker-pulse" style="background-color: ${color};"></div>
             </div>
         `,
-        className: 'object-marker-icon',
-        iconSize: [32, 32],
-        iconAnchor: [16, 16],
-        popupAnchor: [0, -16]
+        className: 'custom-marker',
+        iconSize: [20, 20],
+        iconAnchor: [10, 10],
+        popupAnchor: [0, -10]
     });
 };
 
-// Create approach point marker icon
-const createApproachIcon = (color: string, distance: number) => {
+// Function to safely parse numeric values
+const safeNumber = (value: string | number): number => {
+    if (typeof value === 'number') return value;
+    const parsed = parseFloat(value);
+    return isNaN(parsed) ? 0 : parsed;
+};
+
+// Modern monochromatic color palette
+const MONOCHROME_COLORS = {
+    primary: '#475569', // slate-600
+    accent: '#64748b', // slate-500
+    light: '#94a3b8', // slate-400
+    lighter: '#cbd5e1', // slate-300
+    lightest: '#e2e8f0', // slate-200
+    dark: '#334155', // slate-700
+    darkest: '#1e293b', // slate-800
+};
+
+// Update approach icon with modern monochromatic design
+const createApproachIcon = (distance: number, isInterpolated: boolean = false) => {
+    // Use monochromatic colors for distances
+    const getDistanceColor = (distance: number) => {
+        return MONOCHROME_COLORS.primary;
+    };
+
+    const color = getDistanceColor(distance);
+    const opacity = isInterpolated ? "0.4" : "0.8";
+    
     const svgTemplate = `
-        <svg width="16" height="16" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-            <circle cx="12" cy="12" r="10" fill="${color}" fill-opacity="0.2" stroke="${color}" stroke-width="2"/>
-            <circle cx="12" cy="12" r="4" fill="${color}"/>
+        <svg width="20" height="20" viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg">
+            <circle cx="10" cy="10" r="8" fill="${color}" fill-opacity="${opacity}" stroke="${color}" stroke-width="1.5" />
+            <text x="10" y="10" dominant-baseline="middle" text-anchor="middle" fill="white" font-weight="bold" font-size="7">${distance}</text>
         </svg>
     `;
 
     const svgUrl = `data:image/svg+xml;base64,${btoa(svgTemplate)}`;
 
+    // Simplified marker without the duplicate top label
     return L.divIcon({
-        html: `
-            <div style="position: relative;">
-                <img src="${svgUrl}" style="width: 16px; height: 16px;"/>
-                <div style="position: absolute; top: -20px; left: 50%; transform: translateX(-50%); 
-                     background-color: ${color}; color: white; padding: 2px 4px; border-radius: 4px; 
-                     font-size: 10px; white-space: nowrap;">
-                    ${distance}m
-                </div>
-            </div>
-        `,
+        html: `<img src="${svgUrl}" style="width:20px;height:20px"/>`,
         className: 'approach-marker-icon',
-        iconSize: [16, 16],
-        iconAnchor: [8, 8],
+        iconSize: [20, 20],
+        iconAnchor: [10, 10],
         popupAnchor: [0, -8]
     });
 };
 
+// Create object detection marker icon with monochromatic design
+const createObjectIcon = () => {
+    const svgTemplate = `
+        <svg width="28" height="28" viewBox="0 0 28 28" xmlns="http://www.w3.org/2000/svg">
+            <circle cx="14" cy="14" r="12" fill="${MONOCHROME_COLORS.darkest}" fill-opacity="0.2" stroke="${MONOCHROME_COLORS.darkest}" stroke-width="1.5"/>
+            <circle cx="14" cy="14" r="5" fill="${MONOCHROME_COLORS.darkest}"/>
+            <path d="M14 4 L14 7 M14 21 L14 24 M4 14 L7 14 M21 14 L24 14" 
+                  stroke="${MONOCHROME_COLORS.darkest}" stroke-width="1.5" stroke-linecap="round"/>
+        </svg>
+    `;
+
+    const svgUrl = `data:image/svg+xml;base64,${btoa(svgTemplate)}`;
+
+    return L.divIcon({
+        html: `<img src="${svgUrl}" style="width: 28px; height: 28px;"/>`,
+        className: 'object-marker-icon',
+        iconSize: [28, 28],
+        iconAnchor: [14, 14],
+        popupAnchor: [0, -14]
+    });
+};
+
+// Add new function for terrain marker
+const createTerrainIcon = (elevation: number) => {
+    const getElevationColor = (elevation: number) => {
+        // Color gradient based on elevation
+        if (elevation < 100) return '#2dd4bf';
+        if (elevation < 300) return '#34d399';
+        if (elevation < 500) return '#fbbf24';
+        if (elevation < 1000) return '#f97316';
+        return '#ef4444';
+    };
+
+    const color = getElevationColor(elevation);
+    const svgTemplate = `
+        <svg width="24" height="24" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+            <path d="M12 2L2 22h20L12 2z" fill="${color}" fill-opacity="0.2" stroke="${color}" stroke-width="2"/>
+            <text x="12" y="18" text-anchor="middle" fill="${color}" font-size="10">${elevation}m</text>
+        </svg>
+    `;
+
+    return L.divIcon({
+        html: svgTemplate,
+        className: 'terrain-marker',
+        iconSize: [24, 24],
+        iconAnchor: [12, 12]
+    });
+};
+
+// Add type for the onValueChange handler
+type SliderValue = number[];
+
 interface SessionMapProps {
     sessions: SessionData[];
     objectMarkers: ObjectMarker[];
-    animationPath: [number, number][];
+    timeFilter: TimeFilter;
+    animationPath?: [number, number][];
 }
 
-export default function SessionMap({ sessions, objectMarkers = [], animationPath = [] }: SessionMapProps) {
-    const mapRef = useRef<L.Map>(null);
-    const animationRef = useRef<number>(0);
-    const markerRef = useRef<L.Marker | null>(null);
+// Function to determine marker color based on speed (monochromatic version)
+const getSpeedColor = (speed: number, reliability?: number): string => {
+    // Adjust color based on reliability if available
+    const alpha = reliability !== undefined ? Math.max(0.3, reliability) : 1;
+    
+    // Single color palette for all speeds
+    return `rgba(${parseInt(MONOCHROME_COLORS.primary.slice(1, 3), 16)}, 
+              ${parseInt(MONOCHROME_COLORS.primary.slice(3, 5), 16)}, 
+              ${parseInt(MONOCHROME_COLORS.primary.slice(5, 7), 16)}, ${alpha})`;
+};
 
-    useEffect(() => {
-        if (!mapRef.current || animationPath.length === 0) return;
+// Format distance nicely
+const formatDistance = (distance: number): string => {
+    if (distance < 1000) {
+        return `${distance.toFixed(1)}m`;
+    }
+    return `${(distance / 1000).toFixed(2)}km`;
+};
 
-        // Create animated marker
-        if (!markerRef.current) {
-            const animatedMarker = L.marker(animationPath[0], {
-                icon: L.divIcon({
-                    className: 'animated-vehicle-marker',
-                    html: `
-                        <div class="w-3 h-3 rounded-full bg-primary border-2 border-white shadow-lg pulse-animation"></div>
-                    `,
-                    iconSize: [12, 12],
-                    iconAnchor: [6, 6]
-                })
-            }).addTo(mapRef.current);
-            markerRef.current = animatedMarker;
+export default function SessionMap({ sessions, objectMarkers, timeFilter, animationPath }: SessionMapProps) {
+    const mapRef = useRef<L.Map | null>(null);
+    const [speedProfiles, setSpeedProfiles] = useState<Map<number, ReturnType<typeof calculateSpeedProfile>>>(new Map());
+    const [detectedManeuvers, setDetectedManeuvers] = useState<Map<number, ReturnType<typeof detectManeuvers>>>(new Map());
+    const [smoothedPaths, setSmoothedPaths] = useState<Map<number, {lat: number, long: number}[]>>(new Map());
+    const {theme} = useTheme();
+    
+    // Find map center based on points
+    const mapCenter = useMemo(() => {
+        if (objectMarkers.length > 0) {
+            return [objectMarkers[0].lat, objectMarkers[0].long] as [number, number];
+        } else if (sessions.length > 0 && sessions[0].clips.length > 0) {
+            return [sessions[0].clips[0].lat, sessions[0].clips[0].long] as [number, number];
         }
+        return [0, 0] as [number, number];
+    }, [sessions, objectMarkers]);
 
-        let currentIdx = 0;
-        const animateMarker = () => {
-            if (currentIdx >= animationPath.length) {
-                currentIdx = 0;
+    // Process approach points with enhanced detection
+    const approachPoints = useMemo(() => {
+        const allPoints: {
+            point: ApproachPoint;
+            objectMarker: ObjectMarker;
+            sessionId: number;
+        }[] = [];
+        
+        objectMarkers.forEach(marker => {
+            sessions.forEach(session => {
+                const points = findFirstApproachPoint(session.clips, marker);
+                points.forEach(point => {
+                    allPoints.push({ 
+                        point, 
+                        objectMarker: marker,
+                        sessionId: safeNumber(session.id)
+                    });
+                });
+            });
+        });
+        
+        return allPoints;
+    }, [sessions, objectMarkers]);
+
+    // Calculate speed profiles and smooth paths for each session
+    useEffect(() => {
+        const newSpeedProfiles = new Map<number, ReturnType<typeof calculateSpeedProfile>>();
+        const newManeuvers = new Map<number, ReturnType<typeof detectManeuvers>>();
+        const newSmoothedPaths = new Map<number, {lat: number, long: number}[]>();
+        
+        sessions.forEach(session => {
+            // Calculate speed profile
+            const profile = calculateSpeedProfile(session.clips);
+            newSpeedProfiles.set(Number(session.id), profile);
+            
+            // Detect maneuvers
+            const maneuvers = detectManeuvers(session.clips);
+            newManeuvers.set(Number(session.id), maneuvers);
+            
+            // Apply Kalman filter for smoother path
+            const smoothedPath = kalmanSmoothCoordinates(session.clips);
+            newSmoothedPaths.set(Number(session.id), smoothedPath);
+        });
+        
+        setSpeedProfiles(newSpeedProfiles);
+        setDetectedManeuvers(newManeuvers);
+        setSmoothedPaths(newSmoothedPaths);
+    }, [sessions]);
+
+    // Create polyline paths for each session (use smoothed paths)
+    const sessionPaths = useMemo(() => {
+        return sessions.map(session => {
+            // Use smoothed path if available, otherwise original clips
+            const pathData = smoothedPaths.get(Number(session.id)) || session.clips;
+            
+            // Map coordinates to [lat, lng] format for polyline
+            const coordinates = pathData.map(point => [point.lat, point.long]);
+            
+            // Add properties like color based on session ID or other attributes
+            return {
+                id: session.id,
+                coordinates,
+                color: `hsl(${(Number(session.id) * 137) % 360}, 70%, 50%)`, // Unique color per session
+                weight: 3,
+                opacity: 0.8
+            };
+        });
+    }, [sessions, smoothedPaths]);
+    
+    // Create approach circles for distance visualization with monochromatic design
+    const approachCircles = useMemo(() => {
+        return objectMarkers.map(marker => {
+            return [50, 100, 150, 200, 250].map(distance => ({
+                center: [marker.lat, marker.long] as [number, number],
+                radius: distance,
+                color: MONOCHROME_COLORS.primary,
+                fillColor: MONOCHROME_COLORS.primary,
+                fillOpacity: 0.05,
+                weight: 1.5,
+                dashArray: distance % 100 === 0 ? '0' : '3',
+                id: `${marker.frameId}-${distance}`
+            }));
+        }).flat();
+    }, [objectMarkers]);
+
+    // Create the MapCenter component for auto-focusing
+    const MapCenter = () => {
+        const map = useMap();
+        
+        useEffect(() => {
+            if (mapCenter[0] !== 0 && mapCenter[1] !== 0) {
+                map.setView(mapCenter, 16);
+                mapRef.current = map;
             }
-
-            if (currentIdx < animationPath.length - 1) {
-                const currentPos = animationPath[currentIdx];
-                const nextPos = animationPath[currentIdx + 1];
-                
-                // Calculate angle for rotation
-                const dx = nextPos[1] - currentPos[1];
-                const dy = nextPos[0] - currentPos[0];
-                const angle = Math.atan2(dx, dy) * 180 / Math.PI;
-                
-                // Update marker position and rotation
-                markerRef.current?.setLatLng(currentPos);
-                const markerElement = markerRef.current?.getElement();
-                if (markerElement) {
-                    markerElement.style.transform += ` rotate(${angle}deg)`;
-                }
-            }
-
-            currentIdx++;
-            animationRef.current = requestAnimationFrame(animateMarker);
-        };
-
-        animateMarker();
-
-        return () => {
-            cancelAnimationFrame(animationRef.current);
-            if (markerRef.current) {
-                markerRef.current.remove();
-                markerRef.current = null;
-            }
-        };
-    }, [animationPath]);
-
-    // Calculate center point from all visible clips and object markers
-    const visibleClips = sessions
-        .filter(s => s.isVisible)
-        .flatMap(s => s.clips);
-
-    const allPoints = [
-        ...visibleClips,
-        ...objectMarkers
-    ];
-
-    const center = allPoints.length > 0
-        ? [
-            allPoints.reduce((sum, point) => sum + point.lat, 0) / allPoints.length,
-            allPoints.reduce((sum, point) => sum + point.long, 0) / allPoints.length
-        ] as [number, number]
-        : [0, 0] as [number, number];
-
-    // Calculate bounds to fit all visible markers
-    const bounds = allPoints.length > 0
-        ? L.latLngBounds(allPoints.map(point => [point.lat, point.long]))
-        : undefined;
-
-    // Calculate optimal zoom level
-    const calculateOptimalZoom = () => {
-        if (!bounds) return 13;
+        }, [map, mapCenter]);
         
-        const PADDING = 0.1;
-        const latDiff = Math.abs(bounds.getNorth() - bounds.getSouth());
-        const lngDiff = Math.abs(bounds.getEast() - bounds.getWest());
-        
-        const paddedLatDiff = latDiff * (1 + PADDING);
-        const paddedLngDiff = lngDiff * (1 + PADDING);
-        
-        const maxDiff = Math.max(paddedLatDiff, paddedLngDiff);
-        const zoom = Math.floor(Math.log2(360 / maxDiff)) + 1;
-        
-        return Math.min(Math.max(zoom, 1), 18);
+        return null;
     };
 
+    // Get session stats summary
+    const sessionStats = useMemo(() => {
+        let totalDistance = 0;
+        let maxSpeed = 0;
+        let avgSpeed = 0;
+        let speedCount = 0;
+        
+        // Combine stats from all sessions
+        Array.from(speedProfiles.values()).forEach(profile => {
+            totalDistance += profile.totalDistance;
+            maxSpeed = Math.max(maxSpeed, profile.maxSpeed);
+            avgSpeed += profile.averageSpeed * profile.distances.length;
+            speedCount += profile.distances.length;
+        });
+        
+        // Calculate overall average
+        const overallAvgSpeed = speedCount > 0 ? avgSpeed / speedCount : 0;
+        
+        return {
+            totalDistance,
+            maxSpeed,
+            avgSpeed: overallAvgSpeed
+        };
+    }, [speedProfiles]);
+
     return (
-        <Card className="overflow-hidden">
-            <style jsx global>{`
-                .pulse-animation {
-                    animation: pulse 2s infinite;
-                }
+        <div className="h-[calc(100vh-8rem)] w-full relative">
+            <MapContainer 
+                center={mapCenter} 
+                zoom={14}
+                style={{ height: '100%', width: '100%' }}
+                zoomControl={false}
+            >
+                <TileLayer
+                    attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+                    url={theme === 'dark' 
+                        ? 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png'
+                        : 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png'
+                    }
+                />
+                <ZoomControl position="bottomright" />
+                <MapCenter />
                 
-                @keyframes pulse {
-                    0% {
-                        transform: scale(1);
-                        opacity: 1;
-                    }
-                    50% {
-                        transform: scale(1.5);
-                        opacity: 0.5;
-                    }
-                    100% {
-                        transform: scale(1);
-                        opacity: 1;
-                    }
-                }
-
-                .object-marker-icon {
-                    filter: drop-shadow(0 0 6px rgba(255, 0, 0, 0.5));
-                }
-                
-                .object-marker-icon:hover {
-                    filter: drop-shadow(0 0 8px rgba(255, 0, 0, 0.8));
-                    transform: scale(1.1);
-                    transition: all 0.2s ease;
-                }
-
-                .animated-vehicle-marker {
-                    transition: all 0.3s linear;
-                }
-
-                .leaflet-polyline {
-                    stroke-dasharray: 8, 8;
-                    animation: dash 1s linear infinite;
-                }
-
-                @keyframes dash {
-                    to {
-                        stroke-dashoffset: -16;
-                    }
-                }
-
-                .object-marker-pulse {
-                    position: absolute;
-                    top: 50%;
-                    left: 50%;
-                    transform: translate(-50%, -50%);
-                    width: 32px;
-                    height: 32px;
-                    background-color: #ff4444;
-                    border-radius: 50%;
-                    opacity: 0.4;
-                    animation: object-pulse 2s infinite;
-                }
-
-                @keyframes object-pulse {
-                    0% {
-                        transform: translate(-50%, -50%) scale(1);
-                        opacity: 0.4;
-                    }
-                    50% {
-                        transform: translate(-50%, -50%) scale(1.5);
-                        opacity: 0;
-                    }
-                    100% {
-                        transform: translate(-50%, -50%) scale(1);
-                        opacity: 0.4;
-                    }
-                }
-            `}</style>
-            <div className="h-[calc(100vh-12rem)] w-full">
-                <MapContainer
-                    center={center}
-                    zoom={calculateOptimalZoom()}
-                    style={{ height: '100%', width: '100%' }}
-                    bounds={bounds}
-                    maxBounds={bounds?.pad(0.5)}
-                    ref={mapRef}
-                >
-                    <TileLayer
-                        attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
-                        url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+                {/* Approach Circles - Updated with monochromatic design */}
+                {approachCircles.map(circle => (
+                    <Circle
+                        key={circle.id}
+                        center={circle.center}
+                        radius={circle.radius}
+                        pathOptions={{
+                            color: circle.color,
+                            fillColor: circle.fillColor,
+                            fillOpacity: circle.fillOpacity,
+                            weight: circle.weight,
+                            dashArray: circle.dashArray
+                        }}
                     />
-                    {animationPath.length > 0 && (
-                        <Polyline 
-                            positions={animationPath}
-                            pathOptions={{ 
-                                color: 'var(--primary)', 
-                                weight: 2,
-                                opacity: 0.8,
-                                dashArray: '8, 8'
-                            }}
-                        />
-                    )}
-                    {sessions.filter(s => s.isVisible).map((session) => (
-                        session.clips.map((clip, index) => (
+                ))}
+                
+                {/* Session Paths */}
+                {sessionPaths.map(path => (
+                    <Polyline
+                        key={path.id}
+                        positions={path.coordinates as [number, number][]}
+                        pathOptions={{
+                            color: MONOCHROME_COLORS.primary,
+                            weight: 2.5,
+                            opacity: 0.7
+                        }}
+                    />
+                ))}
+                
+                {/* Session Points - Updated with monochromatic design */}
+                {sessions.map(session => {
+                    const speedProfile = speedProfiles.get(Number(session.id));
+                    const maneuvers = detectedManeuvers.get(Number(session.id));
+                    
+                    if (!speedProfile || !maneuvers) return null;
+                    
+                    return session.clips.map((clip, index) => {
+                        const speedData = speedProfile.speedData[index > 0 ? index - 1 : 0];
+                        
+                        // Only show markers every 30th point for less clutter
+                        if (index % 30 !== 0) {
+                            return null;
+                        }
+                        
+                        return (
                             <Marker
-                                key={`${session.id}-${index}`}
+                                key={`${session.id}-${clip.frameId}`}
                                 position={[clip.lat, clip.long]}
-                                icon={createColoredIcon(session.color)}
+                                icon={L.divIcon({
+                                    html: `<div style="background-color: ${MONOCHROME_COLORS.primary}; width: 6px; height: 6px; border-radius: 50%; opacity: 0.8;"></div>`,
+                                    className: '',
+                                    iconSize: [6, 6],
+                                    iconAnchor: [3, 3]
+                                })}
                             >
-                                <Popup>
-                                    <div className="space-y-4 min-w-[250px]">
-                                        <div className="flex items-center gap-2">
-                                            <div 
-                                                className="w-3 h-3 rounded-full" 
-                                                style={{ backgroundColor: session.color }}
-                                            />
-                                            <div className="font-medium truncate flex-1" style={{ fontSize: '0.95rem' }}>
-                                                {session.name}
-                                            </div>
-                                        </div>
-                                        
-                                        <div className="grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
-                                            <div className="space-y-1">
-                                                <div className="text-xs font-medium text-muted-foreground">Frame ID</div>
-                                                <div>{clip.frameId}</div>
-                                            </div>
-                                            <div className="space-y-1">
-                                                <div className="text-xs font-medium text-muted-foreground">Timestamp</div>
-                                                <div>{clip.datetime_timestamp}</div>
-                                            </div>
-                                            
-                                            {clip.speedData && (
-                                                <>
-                                                    <div className="space-y-1">
-                                                        <div className="text-xs font-medium text-muted-foreground">Speed</div>
-                                                        <div>
-                                                            {clip.speedData.speed.toFixed(1)} km/h
-                                                            <span className="text-xs text-muted-foreground ml-1">
-                                                                ({clip.speedData.speedMS.toFixed(1)} m/s)
-                                                            </span>
-                                                        </div>
-                                                    </div>
-                                                    <div className="space-y-1">
-                                                        <div className="text-xs font-medium text-muted-foreground">Distance</div>
-                                                        <div>{clip.speedData.distance.toFixed(1)} m</div>
-                                                    </div>
-                                                </>
-                                            )}
-                                            
-                                            <div className="col-span-2 space-y-1">
-                                                <div className="text-xs font-medium text-muted-foreground">Coordinates</div>
-                                                <div className="font-mono text-xs">
-                                                    {clip.lat.toFixed(6)}, {clip.long.toFixed(6)}
+                                <Popup className="custom-popup">
+                                    <Card className="border-0 shadow-none">
+                                        <CardHeader className="p-2 pb-0">
+                                            <CardTitle className="text-sm">Point Data</CardTitle>
+                                            <CardDescription className="text-xs">
+                                                Session: {session.id} | Frame: {clip.frameId}
+                                            </CardDescription>
+                                        </CardHeader>
+                                        <CardContent className="p-2 pt-1">
+                                            <div className="grid gap-1 text-xs">
+                                                <div className="flex items-center">
+                                                    <Clock size={14} className="mr-1" />
+                                                    {formatTime(clip.datetime_timestamp)}
+                                                </div>
+                                                <div className="flex items-center">
+                                                    <Gauge size={14} className="mr-1" />
+                                                    {speedData?.speed ? speedData.speed.toFixed(1) : "0.0"} km/h
                                                 </div>
                                             </div>
-
-                                            {clip.distanceFromObject !== undefined && (
-                                                <div className="col-span-2 space-y-1 pt-2">
-                                                    <div className="text-xs font-medium text-muted-foreground">
-                                                        Distance to Nearest Object
-                                                    </div>
-                                                    <div className="text-sm font-medium" style={{ color: '#ff4444' }}>
-                                                        {clip.distanceFromObject.toFixed(1)} m
-                                                    </div>
-                                                </div>
-                                            )}
-                                        </div>
-                                    </div>
+                                        </CardContent>
+                                    </Card>
                                 </Popup>
                             </Marker>
-                        ))
-                    ))}
-                    {objectMarkers.map((marker, index) => (
-                        <div key={`object-group-${marker.frameId}`}>
-                            {marker.approachPoints?.map((ap, apIndex) => (
-                                <div key={`approach-${marker.frameId}-${ap.frameId}`}>
-                                    <Marker
-                                        position={[ap.lat, ap.long]}
-                                        icon={createApproachIcon(marker.sessionColor, ap.targetDistance)}
-                                        zIndexOffset={1000}
-                                    >
-                                        <Popup>
-                                            <div className="space-y-4 min-w-[250px]">
-                                                <div className="flex items-center gap-2">
-                                                    <div 
-                                                        className="w-3 h-3 rounded-full" 
-                                                        style={{ backgroundColor: marker.sessionColor }}
-                                                    />
-                                                    <div className="font-medium" style={{ fontSize: '0.95rem' }}>
-                                                        {ap.targetDistance}m Approach Point
-                                                    </div>
-                                                </div>
-                                                
-                                                <div className="grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
-                                                    <div className="space-y-1">
-                                                        <div className="text-xs font-medium text-muted-foreground">Frame ID</div>
-                                                        <div>{ap.frameId}</div>
-                                                    </div>
-                                                    <div className="space-y-1">
-                                                        <div className="text-xs font-medium text-muted-foreground">Distance</div>
-                                                        <div>{ap.distance.toFixed(1)} m</div>
-                                                    </div>
-                                                    <div className="col-span-2 space-y-1">
-                                                        <div className="text-xs font-medium text-muted-foreground">Time Before Object</div>
-                                                        <div>{ap.timeDifference.toFixed(1)} seconds</div>
-                                                    </div>
-                                                    <div className="col-span-2 space-y-1">
-                                                        <div className="text-xs font-medium text-muted-foreground">Timestamp</div>
-                                                        <div>{ap.datetime_timestamp}</div>
-                                                    </div>
-                                                    <div className="col-span-2 space-y-1">
-                                                        <div className="text-xs font-medium text-muted-foreground">Coordinates</div>
-                                                        <div className="font-mono text-xs">
-                                                            {ap.lat.toFixed(6)}, {ap.long.toFixed(6)}
-                                                        </div>
-                                                    </div>
-                                                </div>
-                                            </div>
-                                        </Popup>
-                                    </Marker>
-                                    <div 
-                                        className="leaflet-div-icon" 
-                                        style={{
-                                            position: 'absolute',
-                                            left: '0',
-                                            top: '0',
-                                            zIndex: '1000',
-                                            backgroundColor: 'transparent',
-                                            border: 'none'
-                                        }}
-                                    >
-                                        <div 
-                                            className="bg-background/90 px-2 py-0.5 rounded-md text-xs font-medium shadow-sm border"
-                                            style={{ color: marker.sessionColor }}
-                                        >
-                                            {ap.targetDistance}m
+                        );
+                    });
+                })}
+                
+                {/* Approach Points with better visualization */}
+                {approachPoints.map(({ point, objectMarker, sessionId }) => (
+                    <Marker
+                        key={`approach-${objectMarker.frameId}-${sessionId}-${point.targetDistance}`}
+                        position={[point.lat, point.long]}
+                        icon={createApproachIcon(point.targetDistance, point.isInterpolated)}
+                    >
+                        <Popup className="approach-popup">
+                            <Card className="border-0 shadow-none">
+                                <CardHeader className="p-2 pb-0">
+                                    <CardTitle className="text-sm">{point.targetDistance}m Approach Point</CardTitle>
+                                    <CardDescription className="text-xs">
+                                        {point.isInterpolated ? 'Interpolated Position' : 'Exact Position'}
+                                    </CardDescription>
+                                </CardHeader>
+                                <CardContent className="p-2 pt-1">
+                                    <div className="grid gap-1 text-xs">
+                                        <div className="flex items-center">
+                                            <Clock size={14} className="mr-1" /> 
+                                            {formatTime(point.datetime_timestamp)}
+                                        </div>
+                                        <div className="flex items-center">
+                                            <ChevronRight size={14} className="mr-1" /> 
+                                            {formatTimeDifference(point.timeDifference)}
+                                        </div>
+                                        <div className="flex items-center">
+                                            <Gauge size={14} className="mr-1" /> 
+                                            {point.speed.toFixed(1)} km/h
+                                        </div>
+                                        <div className="flex items-center">
+                                            <Navigation size={14} className="mr-1" /> 
+                                            Bearing: {point.bearingToObject.toFixed(0)}°
                                         </div>
                                     </div>
-                                </div>
-                            ))}
-                            <Marker
-                                key={`object-${marker.frameId}`}
-                                position={[marker.lat, marker.long]}
-                                icon={createObjectIcon()}
-                                zIndexOffset={2000}
-                            >
-                                <Popup>
-                                    <div className="space-y-4 min-w-[250px]">
-                                        <div className="flex items-center gap-2">
-                                            <div 
-                                                className="w-3 h-3 rounded-full" 
-                                                style={{ backgroundColor: marker.sessionColor }}
-                                            />
-                                            <div className="font-medium" style={{ fontSize: '0.95rem' }}>
-                                                Object Detection
-                                            </div>
+                                </CardContent>
+                            </Card>
+                        </Popup>
+                    </Marker>
+                ))}
+                
+                {/* Object Markers */}
+                {objectMarkers.map(marker => (
+                    <Marker
+                        key={marker.frameId}
+                        position={[marker.lat, marker.long]}
+                        icon={createObjectIcon()}
+                    >
+                        <Popup className="object-popup">
+                            <Card className="border-0 shadow-none">
+                                <CardHeader className="p-2 pb-0">
+                                    <CardTitle className="text-sm">{marker.sessionName || `Object ${marker.frameId}`}</CardTitle>
+                                    <CardDescription className="text-xs">
+                                        Frame: {marker.frameId}
+                                    </CardDescription>
+                                </CardHeader>
+                                <CardContent className="p-2 pt-1">
+                                    <div className="grid gap-1 text-xs">
+                                        <div className="flex items-center">
+                                            <Clock size={14} className="mr-1" /> 
+                                            {formatTime(marker.datetime_timestamp)}
                                         </div>
-                                        
-                                        <div className="grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
-                                            <div className="space-y-1">
-                                                <div className="text-xs font-medium text-muted-foreground">Frame ID</div>
-                                                <div>{marker.frameId}</div>
-                                            </div>
-                                            <div className="space-y-1">
-                                                <div className="text-xs font-medium text-muted-foreground">Session</div>
-                                                <div className="truncate">
-                                                    {marker.sessionName}
-                                                </div>
-                                            </div>
-                                            <div className="col-span-2 space-y-1">
-                                                <div className="text-xs font-medium text-muted-foreground">Timestamp</div>
-                                                <div>{marker.datetime_timestamp}</div>
-                                            </div>
-                                            <div className="col-span-2 space-y-1">
-                                                <div className="text-xs font-medium text-muted-foreground">Coordinates</div>
-                                                <div className="font-mono text-xs">
-                                                    {marker.lat.toFixed(6)}, {marker.long.toFixed(6)}
-                                                </div>
+                                        <div className="mt-1">
+                                            <div className="font-semibold text-xs mb-1">Approach Points:</div>
+                                            <div className="grid grid-cols-5 gap-1">
+                                                {[50, 100, 150, 200, 250].map(distance => {
+                                                    const found = approachPoints.some(ap => 
+                                                        ap.objectMarker.frameId === marker.frameId && 
+                                                        ap.point.targetDistance === distance
+                                                    );
+                                                    
+                                                    return (
+                                                        <Badge 
+                                                            key={distance}
+                                                            className={`text-[10px] ${found ? 'bg-green-500' : 'bg-gray-400'}`}
+                                                        >
+                                                            {distance}m
+                                                        </Badge>
+                                                    );
+                                                })}
                                             </div>
                                         </div>
                                     </div>
-                                </Popup>
-                            </Marker>
-                        </div>
-                    ))}
-                </MapContainer>
+                                </CardContent>
+                            </Card>
+                        </Popup>
+                    </Marker>
+                ))}
+            </MapContainer>
+            
+            {/* Stats Panel */}
+            <div className="absolute left-2 top-2 bg-background/80 backdrop-blur-sm p-2 rounded border border-border z-[1000] shadow-md">
+                <div className="text-xs font-semibold mb-1">Session Data Analyzer</div>
+                <div className="grid grid-cols-3 gap-2 text-xs">
+                    <div className="flex flex-col items-center">
+                        <div className="font-semibold">{sessions.length}</div>
+                        <div>Sessions</div>
+                    </div>
+                    <div className="flex flex-col items-center">
+                        <div className="font-semibold">{objectMarkers.length}</div>
+                        <div>Objects</div>
+                    </div>
+                    <div className="flex flex-col items-center">
+                        <div className="font-semibold">{approachPoints.length}</div>
+                        <div>Approaches</div>
+                    </div>
+                </div>
+                <Separator className="my-2" />
+                <div className="grid gap-1 text-xs">
+                    <div className="flex justify-between">
+                        <span>Total Distance:</span>
+                        <span className="font-semibold">{formatDistance(sessionStats.totalDistance)}</span>
+                    </div>
+                    <div className="flex justify-between">
+                        <span>Max Speed:</span>
+                        <span className="font-semibold">{sessionStats.maxSpeed.toFixed(1)} km/h</span>
+                    </div>
+                    <div className="flex justify-between">
+                        <span>Avg Speed:</span>
+                        <span className="font-semibold">{sessionStats.avgSpeed.toFixed(1)} km/h</span>
+                    </div>
+                </div>
             </div>
-        </Card>
+        </div>
     );
 } 

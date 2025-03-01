@@ -4,6 +4,7 @@ import { useState, useEffect, useRef } from 'react';
 import Papa from 'papaparse';
 import { SessionData, SESSION_COLORS, DEFAULT_DISTANCE_FILTERS, DistanceFilter, ObjectMarker, findFirstApproachPoint, TimeFilter, TIME_FILTER_OPTIONS } from '../types/session';
 import { calculateSpeedBetweenPoints, calculateDistance } from '../utils/calculations';
+import { getTimeInMs } from '../utils/timeUtils';
 import dynamic from 'next/dynamic';
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -23,11 +24,13 @@ import {
     Gauge,
     Plus,
     Target,
-    Settings2
+    Settings2,
+    Clock
 } from 'lucide-react';
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import AnalysisPanel from './AnalysisPanel';
 import ExportReport from './ExportReport';
+import TimestampDebug from './TimestampDebug';
 
 // Dynamically import the SessionMap component
 const SessionMap = dynamic(() => import('./SessionMap'), {
@@ -49,10 +52,10 @@ const getTimeOrFrame = (item: { datetime_timestamp: string; frameId: number }): 
     // Try to get valid timestamp first
     if (item.datetime_timestamp && item.datetime_timestamp !== 'N/A') {
         try {
-            const time = new Date(item.datetime_timestamp).getTime();
+            const time = getTimeInMs(item.datetime_timestamp);
             if (!isNaN(time)) return time;
         } catch (e) {
-            // Fall through to use frameId
+            console.warn(`Failed to parse timestamp: ${item.datetime_timestamp}, falling back to frameId`);
         }
     }
     // Fallback to frameId
@@ -262,6 +265,7 @@ export default function CsvUploader() {
             ...filter,
             isActive: filter.distance === distance ? !filter.isActive : false
         })));
+
     };
 
     // Get active distance filter
@@ -273,22 +277,30 @@ export default function CsvUploader() {
         let filteredClips = session.clips;
         
         if (objectMarkers.length > 0) {
-            // Get earliest object time or frame
-            const earliestObject = Math.min(...objectMarkers.map(m => getTimeOrFrame(m)));
-
-            filteredClips = filteredClips.filter(clip => {
-                const clipTimeOrFrame = getTimeOrFrame(clip);
+            // Get the timestamps of all object markers
+            const objectTimes = getObjectTimes(objectMarkers);
+            
+            if (objectTimes.length > 0) {
+                // Get earliest object time
+                const earliestObject = Math.min(...objectTimes);
                 
-                switch (timeFilter) {
-                    case 'before':
-                        return clipTimeOrFrame < earliestObject;
-                    case 'after':
-                        return clipTimeOrFrame >= earliestObject;
-                    case 'all':
-                    default:
-                        return true;
-                }
-            });
+                filteredClips = filteredClips.filter(clip => {
+                    // Ensure we have a valid comparison value (time or frame)
+                    const clipTimeOrFrame = getTimeOrFrame(clip);
+                    
+                    switch (timeFilter) {
+                        case 'before':
+                            return clipTimeOrFrame < earliestObject;
+                        case 'after':
+                            return clipTimeOrFrame >= earliestObject;
+                        case 'none':
+                            return false; // Hide all markers
+                        case 'all':
+                        default:
+                            return true;
+                    }
+                });
+            }
         }
 
         // Then apply distance filter
@@ -306,14 +318,30 @@ export default function CsvUploader() {
     });
 
     // Use the same filtering logic for animation path
-    const animationPath = timeFilter === 'before' && objectMarkers.length > 0 ? 
+    const animationPath = objectMarkers.length > 0 && timeFilter !== 'none' ? 
         sessions
             .filter(s => s.isVisible)
             .flatMap(session => {
-                const earliestObject = Math.min(...objectMarkers.map(m => getTimeOrFrame(m)));
-
-                return session.clips
-                    .filter(clip => getTimeOrFrame(clip) < earliestObject)
+                // Get the timestamps of all object markers
+                const objectTimes = getObjectTimes(objectMarkers);
+                
+                if (objectTimes.length === 0) {
+                    return [];
+                }
+                
+                const earliestObject = Math.min(...objectTimes);
+                
+                let filteredClips = session.clips;
+                
+                // Apply time filtering
+                if (timeFilter === 'before') {
+                    filteredClips = filteredClips.filter(clip => getTimeOrFrame(clip) < earliestObject);
+                } else if (timeFilter === 'after') {
+                    filteredClips = filteredClips.filter(clip => getTimeOrFrame(clip) >= earliestObject);
+                }
+                // For 'all', use all clips
+                
+                return filteredClips
                     .sort((a, b) => getTimeOrFrame(a) - getTimeOrFrame(b))
                     .map(clip => [clip.lat, clip.long] as [number, number]);
             })
@@ -433,9 +461,10 @@ export default function CsvUploader() {
                         <div className="col-span-12 lg:col-span-9">
                             <div ref={mapContainerRef}>
                                 <SessionMap 
-                                    sessions={filteredSessions} 
+                                    sessions={filteredSessions.filter(s => s.isVisible)} 
                                     objectMarkers={objectMarkers} 
-                                    animationPath={animationPath}
+                                    timeFilter={timeFilter}
+                                    animationPath={animationPath} 
                                 />
                             </div>
                         </div>
@@ -471,6 +500,64 @@ export default function CsvUploader() {
                     </div>
                 </SheetContent>
             </Sheet>
+
+            <div className="container mx-auto py-6 space-y-6">
+                <div className="flex justify-between items-center">
+                    <div className="space-y-1">
+                        <h1 className="text-2xl font-bold tracking-tight">Session Data Analyzer</h1>
+                        <p className="text-sm text-muted-foreground">
+                            Upload, analyze, and visualize location data.
+                        </p>
+                    </div>
+                    
+                    <div className="flex gap-2">
+                        <Tooltip>
+                            <TooltipTrigger asChild>
+                                <Button 
+                                    variant="outline" 
+                                    size="sm" 
+                                    onClick={() => setActiveTab(activeTab === 'debug' ? 'map' : 'debug')}
+                                >
+                                    <Clock className="h-4 w-4 mr-2" />
+                                    {activeTab === 'debug' ? 'Back to Map' : 'Debug Times'}
+                                </Button>
+                            </TooltipTrigger>
+                            <TooltipContent>
+                                <p>Timestamp debugging tool</p>
+                            </TooltipContent>
+                        </Tooltip>
+                        
+                        <ExportReport 
+                            sessions={sessions}
+                            objectMarkers={objectMarkers}
+                            mapRef={mapContainerRef}
+                        />
+                        <Button 
+                            variant="outline"
+                            onClick={() => setIsSettingsOpen(true)}
+                        >
+                            <Settings2 className="h-4 w-4 mr-2" />
+                            Settings
+                        </Button>
+                        <Button asChild>
+                            <label className="cursor-pointer">
+                                <Plus className="h-4 w-4 mr-2" />
+                                Add Session
+                                <input
+                                    type="file"
+                                    accept=".csv"
+                                    onChange={handleFileUpload}
+                                    className="hidden"
+                                />
+                            </label>
+                        </Button>
+                    </div>
+                </div>
+                
+                {activeTab === 'debug' && (
+                    <TimestampDebug />
+                )}
+            </div>
         </>
     );
 } 

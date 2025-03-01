@@ -1,4 +1,5 @@
-import { calculateDistance } from '../utils/calculations';
+import { calculateDistance, calculateBearing, SpeedData } from '../utils/calculations';
+import { parseTimestamp, getTimeInMs, getTimeDifference } from '../utils/timeUtils';
 
 export interface ClipData {
     datetime_timestamp: string;
@@ -12,6 +13,7 @@ export interface ClipData {
     speedData?: SpeedData;
     hasInvalidFields?: boolean;
     missingFields?: string[];
+    confidence?: number; // Confidence level of GPS coordinates (0-1)
 }
 
 export interface SessionData {
@@ -42,6 +44,9 @@ export interface ApproachPoint {
     distance: number;
     timeDifference: number; // Time difference in seconds from object detection
     targetDistance: number; // The target distance this point represents (50m, 100m, etc.)
+    bearingToObject: number;
+    speed: number;
+    isInterpolated?: boolean;
 }
 
 export interface DistanceFilter {
@@ -72,11 +77,6 @@ export const SESSION_COLORS = [
     '#2ECC71', // Emerald
 ];
 
-// Helper function to parse timestamp string into Date object
-export function parseTimestamp(timestamp: string): Date {
-    return new Date(timestamp);
-}
-
 // Helper function to find approach points
 export function findApproachPoints(
     clips: ClipData[],
@@ -85,7 +85,7 @@ export function findApproachPoints(
 ): ApproachPoint[] {
     const objectTime = parseTimestamp(objectTimestamp);
     const sortedClips = [...clips].sort((a, b) => 
-        parseTimestamp(a.datetime_timestamp).getTime() - parseTimestamp(b.datetime_timestamp).getTime()
+        getTimeInMs(a.datetime_timestamp) - getTimeInMs(b.datetime_timestamp)
     );
 
     const approachPoints: ApproachPoint[] = [];
@@ -109,8 +109,10 @@ export function findApproachPoints(
                 long: clip.long,
                 datetime_timestamp: clip.datetime_timestamp,
                 distance: clip.distanceFromObject,
-                timeDifference: (objectTime.getTime() - clipTime.getTime()) / 1000,
-                targetDistance: targetDistance
+                timeDifference: getTimeDifference(clip.datetime_timestamp, objectTimestamp),
+                targetDistance: targetDistance,
+                bearingToObject: 0,
+                speed: clip.speedData?.speed || 0
             });
         }
     }
@@ -148,20 +150,56 @@ export function findFirstApproachPoint(
     objectMarker: ObjectMarker,
     targetDistances: number[] = [50, 100, 150, 200, 250]
 ): ApproachPoint[] {
-    const objectTime = parseTimestamp(objectMarker.datetime_timestamp);
-    const sortedClips = [...clips].sort((a, b) => 
-        parseTimestamp(a.datetime_timestamp).getTime() - parseTimestamp(b.datetime_timestamp).getTime()
-    );
+    // Try to get valid timestamp
+    let objectTime: Date | null = null;
+    try {
+        if (objectMarker.datetime_timestamp && objectMarker.datetime_timestamp !== 'N/A') {
+            objectTime = parseTimestamp(objectMarker.datetime_timestamp);
+            if (isNaN(objectTime.getTime())) {
+                objectTime = null;
+            }
+        }
+    } catch (e) {
+        objectTime = null;
+    }
+    
+    // Sort clips by either timestamp (if valid) or frameId
+    const sortedClips = [...clips].sort((a, b) => {
+        if (objectTime) {
+            try {
+                const timeA = getTimeInMs(a.datetime_timestamp);
+                const timeB = getTimeInMs(b.datetime_timestamp);
+                if (!isNaN(timeA) && !isNaN(timeB)) {
+                    return timeA - timeB;
+                }
+            } catch (e) {
+                // Fall back to frame ID sorting
+            }
+        }
+        return a.frameId - b.frameId;
+    });
 
     const approachPoints: ApproachPoint[] = [];
     const foundDistances = new Set<number>();
 
+    // Prepare point for interpolation if needed
+    let prevPoint: ClipData | null = null;
+    let nextPoint: ClipData | null = null;
+
     for (let i = 0; i < sortedClips.length; i++) {
         const clip = sortedClips[i];
-        const clipTime = parseTimestamp(clip.datetime_timestamp);
         
-        // Skip if we're past the object's time
-        if (clipTime > objectTime) continue;
+        // Skip if we're past the object's time (when timestamp is valid)
+        if (objectTime) {
+            try {
+                const clipTime = parseTimestamp(clip.datetime_timestamp);
+                if (!isNaN(clipTime.getTime()) && clipTime > objectTime) {
+                    continue;
+                }
+            } catch (e) {
+                // Ignore timestamp comparison error and continue
+            }
+        }
 
         // Calculate distance to object
         const distanceToObject = calculateDistance(
@@ -171,21 +209,116 @@ export function findFirstApproachPoint(
             objectMarker.long
         );
 
+        prevPoint = clip;
+        nextPoint = sortedClips[i + 1] || null;
+
         // Check each target distance
         for (const targetDistance of targetDistances) {
-            if (!foundDistances.has(targetDistance) && 
-                Math.abs(distanceToObject - targetDistance) < 5) { // 5m tolerance
-                
-                foundDistances.add(targetDistance);
-                approachPoints.push({
-                    frameId: clip.frameId,
-                    lat: clip.lat,
-                    long: clip.long,
-                    datetime_timestamp: clip.datetime_timestamp,
-                    distance: distanceToObject,
-                    timeDifference: (objectTime.getTime() - clipTime.getTime()) / 1000,
-                    targetDistance
-                });
+            if (!foundDistances.has(targetDistance)) {
+                // Check if this point is close to our target distance
+                if (Math.abs(distanceToObject - targetDistance) < 5) { // 5m tolerance
+                    foundDistances.add(targetDistance);
+                    
+                    // Calculate bearing to the object
+                    const bearingToObject = calculateBearing(
+                        clip.lat,
+                        clip.long,
+                        objectMarker.lat,
+                        objectMarker.long
+                    );
+                    
+                    // Calculate time difference if possible
+                    let timeDifference = 0;
+                    if (objectTime) {
+                        try {
+                            const clipTime = parseTimestamp(clip.datetime_timestamp);
+                            if (!isNaN(clipTime.getTime())) {
+                                timeDifference = getTimeDifference(clip.datetime_timestamp, objectMarker.datetime_timestamp);
+                            }
+                        } catch (e) {
+                            // Default time difference based on frames if timestamp is invalid
+                            timeDifference = (objectMarker.frameId - clip.frameId) / 30; // Assuming 30fps
+                        }
+                    } else {
+                        // Default time difference based on frames
+                        timeDifference = (objectMarker.frameId - clip.frameId) / 30; // Assuming 30fps
+                    }
+                    
+                    approachPoints.push({
+                        frameId: clip.frameId,
+                        lat: clip.lat,
+                        long: clip.long,
+                        datetime_timestamp: clip.datetime_timestamp,
+                        distance: distanceToObject,
+                        timeDifference: timeDifference,
+                        targetDistance,
+                        bearingToObject,
+                        speed: clip.speedData?.speed || 0
+                    });
+                }
+                // If we don't have exact point, but we have points on either side of target distance
+                // interpolate a point at the target distance
+                else if (nextPoint && 
+                         distanceToObject > targetDistance && 
+                         calculateDistance(nextPoint.lat, nextPoint.long, objectMarker.lat, objectMarker.long) < targetDistance) {
+                    
+                    // Linear interpolation to estimate the position at target distance
+                    const d1 = distanceToObject;
+                    const d2 = calculateDistance(nextPoint.lat, nextPoint.long, objectMarker.lat, objectMarker.long);
+                    const ratio = (d1 - targetDistance) / (d1 - d2);
+                    
+                    const interpolatedLat = clip.lat + ratio * (nextPoint.lat - clip.lat);
+                    const interpolatedLong = clip.long + ratio * (nextPoint.long - clip.long);
+                    
+                    // Calculate bearing to the object
+                    const bearingToObject = calculateBearing(
+                        interpolatedLat,
+                        interpolatedLong,
+                        objectMarker.lat,
+                        objectMarker.long
+                    );
+                    
+                    // Interpolate frameId
+                    const interpolatedFrameId = Math.round(clip.frameId + ratio * (nextPoint.frameId - clip.frameId));
+                    
+                    // Calculate time difference if possible
+                    let timeDifference = 0;
+                    if (objectTime) {
+                        try {
+                            const clipTime = parseTimestamp(clip.datetime_timestamp);
+                            const nextTime = parseTimestamp(nextPoint.datetime_timestamp);
+                            
+                            if (!isNaN(clipTime.getTime()) && !isNaN(nextTime.getTime())) {
+                                const interpolatedTime = clipTime.getTime() + ratio * (nextTime.getTime() - clipTime.getTime());
+                                timeDifference = (objectTime.getTime() - interpolatedTime) / 1000;
+                            }
+                        } catch (e) {
+                            // Default time difference based on frames if timestamp is invalid
+                            timeDifference = (objectMarker.frameId - interpolatedFrameId) / 30; // Assuming 30fps
+                        }
+                    } else {
+                        // Default time difference based on frames
+                        timeDifference = (objectMarker.frameId - interpolatedFrameId) / 30; // Assuming 30fps
+                    }
+                    
+                    // Estimate the speed at this point
+                    const speed = clip.speedData?.speed || 
+                                (nextPoint.speedData?.speed || 0);
+                    
+                    foundDistances.add(targetDistance);
+                    approachPoints.push({
+                        frameId: interpolatedFrameId,
+                        lat: interpolatedLat,
+                        long: interpolatedLong,
+                        datetime_timestamp: clip.datetime_timestamp, // Using the previous point's timestamp as reference
+                        distance: targetDistance,
+                        timeDifference: timeDifference,
+                        targetDistance,
+                        bearingToObject,
+                        speed,
+                        isInterpolated: true
+                    });
+                }
             }
         }
     }
@@ -194,7 +327,7 @@ export function findFirstApproachPoint(
     return approachPoints.sort((a, b) => a.targetDistance - b.targetDistance);
 }
 
-export type TimeFilter = 'before' | 'after' | 'all';
+export type TimeFilter = 'before' | 'after' | 'all' | 'none';
 
 export interface TimeFilterOption {
     value: TimeFilter;
@@ -217,5 +350,10 @@ export const TIME_FILTER_OPTIONS: TimeFilterOption[] = [
         value: 'all', 
         label: 'All Markers', 
         description: 'Show all markers' 
+    },
+    { 
+        value: 'none', 
+        label: 'None', 
+        description: 'Hide all markers (keep only distance indicators)' 
     }
 ]; 
